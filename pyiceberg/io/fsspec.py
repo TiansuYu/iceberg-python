@@ -20,15 +20,14 @@ import errno
 import json
 import logging
 import os
-from copy import copy
-from functools import lru_cache, partial
+from functools import cache
+from functools import partial
 from typing import (
     Any,
     Callable,
     Dict,
     Union,
 )
-from urllib.parse import urlparse
 
 import requests
 from botocore import UNSIGNED
@@ -71,12 +70,8 @@ from pyiceberg.io import (
     S3_SIGNER_ENDPOINT_DEFAULT,
     S3_SIGNER_URI,
     ADLFS_ClIENT_SECRET,
-    FileIO,
-    InputFile,
-    InputStream,
-    OutputFile,
-    OutputStream,
 )
+from pyiceberg.io.interface import FileIO, InputFile, OutputFile, InputStream, OutputStream
 from pyiceberg.typedef import Properties
 from pyiceberg.utils.properties import get_first_property_value, property_as_bool
 
@@ -303,9 +298,7 @@ class FsspecFileIO(FileIO):
     """A FileIO implementation that uses fsspec."""
 
     def __init__(self, properties: Properties):
-        self._scheme_to_fs = {}
-        self._scheme_to_fs.update(SCHEME_TO_FS)
-        self.get_fs: Callable[[str], AbstractFileSystem] = lru_cache(self._get_fs)
+        self._scheme_to_fs = SCHEME_TO_FS
         super().__init__(properties=properties)
 
     def new_input(self, location: str) -> FsspecInputFile:
@@ -317,8 +310,7 @@ class FsspecFileIO(FileIO):
         Returns:
             FsspecInputFile: An FsspecInputFile instance for the given location.
         """
-        uri = urlparse(location)
-        fs = self.get_fs(uri.scheme)
+        fs = self.fs_by_uri(location)
         return FsspecInputFile(location=location, fs=fs)
 
     def new_output(self, location: str) -> FsspecOutputFile:
@@ -330,8 +322,7 @@ class FsspecFileIO(FileIO):
         Returns:
             FsspecOutputFile: An FsspecOutputFile instance for the given location.
         """
-        uri = urlparse(location)
-        fs = self.get_fs(uri.scheme)
+        fs = self.fs_by_uri(location)
         return FsspecOutputFile(location=location, fs=fs)
 
     def delete(self, location: Union[str, InputFile, OutputFile]) -> None:
@@ -342,28 +333,16 @@ class FsspecFileIO(FileIO):
                 OutputFile instance is provided, the location attribute for that instance is used as the location
                 to delete.
         """
+        location_uri = location
         if isinstance(location, (InputFile, OutputFile)):
-            str_location = location.location  # Use InputFile or OutputFile location
-        else:
-            str_location = location
+            location_uri = location.location  # Use InputFile or OutputFile location
 
-        uri = urlparse(str_location)
-        fs = self.get_fs(uri.scheme)
-        fs.rm(str_location)
+        fs = self.fs_by_uri(location_uri)
+        fs.rm(location_uri)
 
-    def _get_fs(self, scheme: str) -> AbstractFileSystem:
-        """Get a filesystem for a specific scheme."""
+    @cache
+    def fs_by_scheme(self, scheme: str) -> AbstractFileSystem:
+        """Get a file system handler per scheme."""
         if scheme not in self._scheme_to_fs:
-            raise ValueError(f"No registered filesystem for scheme: {scheme}")
+            raise NotImplementedError(f"No registered filesystem for scheme: {scheme}")
         return self._scheme_to_fs[scheme](self.properties)
-
-    def __getstate__(self) -> Dict[str, Any]:
-        """Create a dictionary of the FsSpecFileIO fields used when pickling."""
-        fileio_copy = copy(self.__dict__)
-        fileio_copy["get_fs"] = None
-        return fileio_copy
-
-    def __setstate__(self, state: Dict[str, Any]) -> None:
-        """Deserialize the state into a FsSpecFileIO instance."""
-        self.__dict__ = state
-        self.get_fs = lru_cache(self._get_fs)

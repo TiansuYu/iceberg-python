@@ -25,29 +25,20 @@ its location.
 
 from __future__ import annotations
 
-import importlib
 import logging
-import os
 import warnings
-from abc import ABC, abstractmethod
-from io import SEEK_SET
-from types import TracebackType
 from typing import (
-    Dict,
-    List,
     Optional,
-    Protocol,
-    Tuple,
-    Type,
-    Union,
-    runtime_checkable,
-)
-from urllib.parse import urlparse
+    TypeVar, )
 
+from pyiceberg.io.interface import FileIO, InputFile, OutputFile, InputStream, OutputStream
 from pyiceberg.typedef import EMPTY_DICT, Properties
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["FileIO", "InputFile", "OutputFile", "InputStream", "OutputStream", "load_file_io"]
+
+# FileIO client kwargs
 AWS_REGION = "client.region"
 AWS_ACCESS_KEY_ID = "client.access-key-id"
 AWS_SECRET_ACCESS_KEY = "client.secret-access-key"
@@ -86,286 +77,54 @@ GCS_DEFAULT_LOCATION = "gcs.default-bucket-location"
 GCS_VERSION_AWARE = "gcs.version-aware"
 PYARROW_USE_LARGE_TYPES_ON_READ = "pyarrow.use-large-types-on-read"
 
-
-@runtime_checkable
-class InputStream(Protocol):
-    """A protocol for the file-like object returned by InputFile.open(...).
-
-    This outlines the minimally required methods for a seekable input stream returned from an InputFile
-    implementation's `open(...)` method. These methods are a subset of IOBase/RawIOBase.
-    """
-
-    @abstractmethod
-    def read(self, size: int = 0) -> bytes: ...
-
-    @abstractmethod
-    def seek(self, offset: int, whence: int = SEEK_SET) -> int: ...
-
-    @abstractmethod
-    def tell(self) -> int: ...
-
-    @abstractmethod
-    def close(self) -> None: ...
-
-    def __enter__(self) -> InputStream:
-        """Provide setup when opening an InputStream using a 'with' statement."""
-
-    @abstractmethod
-    def __exit__(
-        self, exctype: Optional[Type[BaseException]], excinst: Optional[BaseException], exctb: Optional[TracebackType]
-    ) -> None:
-        """Perform cleanup when exiting the scope of a 'with' statement."""
-
-
-@runtime_checkable
-class OutputStream(Protocol):  # pragma: no cover
-    """A protocol for the file-like object returned by OutputFile.create(...).
-
-    This outlines the minimally required methods for a writable output stream returned from an OutputFile
-    implementation's `create(...)` method. These methods are a subset of IOBase/RawIOBase.
-    """
-
-    @abstractmethod
-    def write(self, b: bytes) -> int: ...
-
-    @abstractmethod
-    def close(self) -> None: ...
-
-    @abstractmethod
-    def __enter__(self) -> OutputStream:
-        """Provide setup when opening an OutputStream using a 'with' statement."""
-
-    @abstractmethod
-    def __exit__(
-        self, exctype: Optional[Type[BaseException]], excinst: Optional[BaseException], exctb: Optional[TracebackType]
-    ) -> None:
-        """Perform cleanup when exiting the scope of a 'with' statement."""
-
-
-class InputFile(ABC):
-    """A base class for InputFile implementations.
-
-    Args:
-        location (str): A URI or a path to a local file.
-
-    Attributes:
-        location (str): The URI or path to a local file for an InputFile instance.
-        exists (bool): Whether the file exists or not.
-    """
-
-    def __init__(self, location: str):
-        self._location = location
-
-    @abstractmethod
-    def __len__(self) -> int:
-        """Return the total length of the file, in bytes."""
-
-    @property
-    def location(self) -> str:
-        """The fully-qualified location of the input file."""
-        return self._location
-
-    @abstractmethod
-    def exists(self) -> bool:
-        """Check whether the location exists.
-
-        Raises:
-            PermissionError: If the file at self.location cannot be accessed due to a permission error.
-        """
-
-    @abstractmethod
-    def open(self, seekable: bool = True) -> InputStream:
-        """Return an object that matches the InputStream protocol.
-
-        Args:
-            seekable: If the stream should support seek, or if it is consumed sequential.
-
-        Returns:
-            InputStream: An object that matches the InputStream protocol.
-
-        Raises:
-            PermissionError: If the file at self.location cannot be accessed due to a permission error.
-            FileNotFoundError: If the file at self.location does not exist.
-        """
-
-
-class OutputFile(ABC):
-    """A base class for OutputFile implementations.
-
-    Args:
-        location (str): A URI or a path to a local file.
-
-    Attributes:
-        location (str): The URI or path to a local file for an OutputFile instance.
-        exists (bool): Whether the file exists or not.
-    """
-
-    def __init__(self, location: str):
-        self._location = location
-
-    @abstractmethod
-    def __len__(self) -> int:
-        """Return the total length of the file, in bytes."""
-
-    @property
-    def location(self) -> str:
-        """The fully-qualified location of the output file."""
-        return self._location
-
-    @abstractmethod
-    def exists(self) -> bool:
-        """Check whether the location exists.
-
-        Raises:
-            PermissionError: If the file at self.location cannot be accessed due to a permission error.
-        """
-
-    @abstractmethod
-    def to_input_file(self) -> InputFile:
-        """Return an InputFile for the location of this output file."""
-
-    @abstractmethod
-    def create(self, overwrite: bool = False) -> OutputStream:
-        """Return an object that matches the OutputStream protocol.
-
-        Args:
-            overwrite (bool): If the file already exists at `self.location`
-                and `overwrite` is False a FileExistsError should be raised.
-
-        Returns:
-            OutputStream: An object that matches the OutputStream protocol.
-
-        Raises:
-            PermissionError: If the file at self.location cannot be accessed due to a permission error.
-            FileExistsError: If the file at self.location already exists and `overwrite=False`.
-        """
-
-
-class FileIO(ABC):
-    """A base class for FileIO implementations."""
-
-    properties: Properties
-
-    def __init__(self, properties: Properties = EMPTY_DICT):
-        self.properties = properties
-
-    @abstractmethod
-    def new_input(self, location: str) -> InputFile:
-        """Get an InputFile instance to read bytes from the file at the given location.
-
-        Args:
-            location (str): A URI or a path to a local file.
-        """
-
-    @abstractmethod
-    def new_output(self, location: str) -> OutputFile:
-        """Get an OutputFile instance to write bytes to the file at the given location.
-
-        Args:
-            location (str): A URI or a path to a local file.
-        """
-
-    @abstractmethod
-    def delete(self, location: Union[str, InputFile, OutputFile]) -> None:
-        """Delete the file at the given path.
-
-        Args:
-            location (Union[str, InputFile, OutputFile]): A URI or a path to a local file--if an InputFile instance or
-                an OutputFile instance is provided, the location attribute for that instance is used as the URI to delete.
-
-        Raises:
-            PermissionError: If the file at location cannot be accessed due to a permission error.
-            FileNotFoundError: When the file at the provided location does not exist.
-        """
-
-
 LOCATION = "location"
 WAREHOUSE = "warehouse"
 
+FSSPEC = "fsspec"
+PYARROW = "pyarrow"
 ARROW_FILE_IO = "pyiceberg.io.pyarrow.PyArrowFileIO"
 FSSPEC_FILE_IO = "pyiceberg.io.fsspec.FsspecFileIO"
-
-# Mappings from the Java FileIO impl to a Python one. The list is ordered by preference.
-# If an implementation isn't installed, it will fall back to the next one.
-SCHEMA_TO_FILE_IO: Dict[str, List[str]] = {
-    "s3": [ARROW_FILE_IO, FSSPEC_FILE_IO],
-    "s3a": [ARROW_FILE_IO, FSSPEC_FILE_IO],
-    "s3n": [ARROW_FILE_IO, FSSPEC_FILE_IO],
-    "gs": [ARROW_FILE_IO],
-    "file": [ARROW_FILE_IO, FSSPEC_FILE_IO],
-    "hdfs": [ARROW_FILE_IO],
-    "viewfs": [ARROW_FILE_IO],
-    "abfs": [FSSPEC_FILE_IO],
-    "abfss": [FSSPEC_FILE_IO],
-}
-
-
-def _import_file_io(io_impl: str, properties: Properties) -> Optional[FileIO]:
-    try:
-        path_parts = io_impl.split(".")
-        if len(path_parts) < 2:
-            raise ValueError(f"py-io-impl should be full path (module.CustomFileIO), got: {io_impl}")
-        module_name, class_name = ".".join(path_parts[:-1]), path_parts[-1]
-        module = importlib.import_module(module_name)
-        class_ = getattr(module, class_name)
-        return class_(properties)
-    except ModuleNotFoundError:
-        logger.warning("Could not initialize FileIO: %s", io_impl)
-        return None
-
-
 PY_IO_IMPL = "py-io-impl"
+DEFAULT_PY_IO_IMPL = PYARROW
+
+FileIOType = TypeVar("FileIOType", bound=FileIO)
 
 
-def _infer_file_io_from_scheme(path: str, properties: Properties) -> Optional[FileIO]:
-    parsed_url = urlparse(path)
-    if parsed_url.scheme:
-        if file_ios := SCHEMA_TO_FILE_IO.get(parsed_url.scheme):
-            for file_io_path in file_ios:
-                if file_io := _import_file_io(file_io_path, properties):
-                    return file_io
-        else:
-            warnings.warn(f"No preferred file implementation for scheme: {parsed_url.scheme}")
-    return None
+def _py_io_impl_argument_parser(py_io_impl: str) -> str:
+    """Keep backward compatibility with the old py-io-impl property"""
+    if py_io_impl in (FSSPEC, PYARROW):
+        return py_io_impl
+    elif py_io_impl == FSSPEC_FILE_IO:
+        warnings.warn("The 'py-io-impl' value 'pyiceberg.io.fsspec.FsspecFileIO' is being deprecated. "
+                      "Please use 'fsspec' instead.")
+        return FSSPEC
+    elif py_io_impl == ARROW_FILE_IO:
+        warnings.warn("The 'py-io-impl' value 'pyiceberg.io.pyarrow.PyArrowFileIO' is being deprecated. "
+                      "Please use 'pyarrow' instead.")
+        return PYARROW
+    else:
+        ValueError(f"Unknown value '{py_io_impl}' for {PY_IO_IMPL}. Accepts only: 'fsspec', 'pyarrow', or the "
+                   f"deprecating params: 'pyiceberg.io.fsspec.FsspecFileIO', 'pyiceberg.io.pyarrow.PyArrowFileIO'")
 
 
 def load_file_io(properties: Properties = EMPTY_DICT, location: Optional[str] = None) -> FileIO:
-    # First look for the py-io-impl property to directly load the class
-    if io_impl := properties.get(PY_IO_IMPL):
-        if file_io := _import_file_io(io_impl, properties):
-            logger.info("Loaded FileIO: %s", io_impl)
-            return file_io
-        else:
-            raise ValueError(f"Could not initialize FileIO: {io_impl}")
-
-    # Check the table location
-    if location:
-        if file_io := _infer_file_io_from_scheme(location, properties):
-            return file_io
-
-    # Look at the schema of the warehouse
-    if warehouse_location := properties.get(WAREHOUSE):
-        if file_io := _infer_file_io_from_scheme(warehouse_location, properties):
-            return file_io
-
-    try:
-        # Default to PyArrow
-        logger.info("Defaulting to PyArrow FileIO")
+    py_io_impl = properties.get(PY_IO_IMPL, DEFAULT_PY_IO_IMPL)
+    py_io_impl = _py_io_impl_argument_parser(py_io_impl)
+    # lazily import pyarrow or fsspec
+    if py_io_impl == PYARROW:
         from pyiceberg.io.pyarrow import PyArrowFileIO
-
-        return PyArrowFileIO(properties)
-    except ModuleNotFoundError as e:
-        raise ModuleNotFoundError(
-            'Could not load a FileIO, please consider installing one: pip3 install "pyiceberg[pyarrow]", for more options refer to the docs.'
-        ) from e
-
-
-def _parse_location(location: str) -> Tuple[str, str, str]:
-    """Return the path without the scheme."""
-    uri = urlparse(location)
-    if not uri.scheme:
-        return "file", uri.netloc, os.path.abspath(location)
-    elif uri.scheme in ("hdfs", "viewfs"):
-        return uri.scheme, uri.netloc, uri.path
+        file_io = PyArrowFileIO(properties)
+        if location and file_io.fs_by_uri(location) is None:
+            warnings.warn(f"Uri scheme {location} is not supported by PyArrowFileIO. "
+                          "Attempts to load by FsspecFileIO instead.")
+            from pyiceberg.io.fsspec import FsspecFileIO
+            file_io = FsspecFileIO(properties)
     else:
-        return uri.scheme, uri.netloc, f"{uri.netloc}{uri.path}"
+        from pyiceberg.io.fsspec import FsspecFileIO
+        file_io = FsspecFileIO(properties)
+        if location and file_io.fs_by_uri(location) is None:
+            warnings.warn(f"Uri scheme {location} is not supported by FsspecFileIO. "
+                          "Attempts to load by PyArrowFileIO instead.")
+            from pyiceberg.io.pyarrow import PyArrowFileIO
+            file_io = PyArrowFileIO(properties)
+    return file_io
